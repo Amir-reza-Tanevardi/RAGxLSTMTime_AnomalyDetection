@@ -1,6 +1,10 @@
+
 from torch.utils.data import Dataset
 import torch
 import random
+
+from typing import List, Tuple, Optional
+
 
 class TorchDataset(Dataset):
     """
@@ -14,9 +18,12 @@ class TorchDataset(Dataset):
 
     def __init__(self, dataset, mode, seq_len, kwargs, device):
         super().__init__()
+        self.dataset_name= dataset.name
         self.mode = mode
         self.device = device
         self.seq_len = seq_len
+        self.ratio = (100.0 * (len(dataset.raw_y) - dataset.raw_y.sum() ) / (len(dataset.raw_y)))
+
 
         # raw data from your Dataset
         self.X_train = torch.from_numpy(dataset.train_windows).float()
@@ -78,6 +85,7 @@ class TorchDataset(Dataset):
         choices.remove(idx)
         sampled = random.sample(choices, self.num_candidates)
         return self.X_train[sampled]  # [K, seq_len, D]
+ 
 
     def set_mode(self, mode):
         """
@@ -86,3 +94,39 @@ class TorchDataset(Dataset):
         assert mode in ('train','val')
         self.mode = mode
         # if full_dataset_cuda was toggled, you may re-send tensors to device here
+
+def collate_with_optional_cand(
+        batch: List[Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]]
+    ):
+        """
+        Args
+        ----
+        batch : list of (x, cand, y)
+            x      : [L, D]  (Tensor)
+            cand   : None or [K, L, D] (Tensor)
+            y      : [L, D]  (Tensor)
+
+        Returns
+        -------
+        xs      : [B, L, D]
+        cands   : None or [B, K, L, D]
+        ys      : [B, L, D]
+        """
+        xs  , ys  = [], []
+        cands     = []
+
+        for x, cand, y in batch:
+            xs.append(x)
+            ys.append(y)
+            if cand is not None:
+                cands.append(cand)
+
+        xs = torch.stack(xs)          # [B,L,D]
+        ys = torch.stack(ys)          # [B,L,D]
+
+        if len(cands) == 0:
+            cands_out = None
+        else:
+            cands_out = torch.stack(cands)   # [B,K,L,D]
+
+        return xs, cands_out, ys   

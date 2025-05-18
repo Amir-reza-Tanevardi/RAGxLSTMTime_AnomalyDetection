@@ -35,6 +35,8 @@ class ReconstructionTransformer(nn.Module):
         self.seq_len = seq_len
         self.hidden_dim = hidden_dim
         self.device = device
+        self.retrieval_enabled = retrieval is not None
+
 
         # ------------------------------------------------------------------ #
         # 1)  Embedding projection (D  ->  hidden_dim)
@@ -85,9 +87,15 @@ class ReconstructionTransformer(nn.Module):
         # 6)  Retrieval settings
         # ------------------------------------------------------------------ #
         self.retrieval_module = retrieval
-        self.retrieval_loc = args.exp_retrieval_location.lower()
-        self.retrieval_agg_loc = args.exp_retrieval_agg_location.lower()
-        self.agg_lambda = args.exp_retrieval_agg_lambda
+        if self.retrieval_enabled and hasattr(args, "exp_retrieval_location"):
+            self.retrieval_loc     = args.exp_retrieval_location.lower()
+            self.retrieval_agg_loc = args.exp_retrieval_agg_location.lower()
+            self.agg_lambda        = args.exp_retrieval_agg_lambda
+        else:                       # no retrieval ⇒ harmless defaults
+            self.retrieval_loc     = "post-encoder"
+            self.retrieval_agg_loc = "post-encoder"
+            self.agg_lambda        = 0.0
+
 
         # sanity‑check ordering
         ORDER = {"pre-embedding": 0, "post-embedding": 1, "post-encoder": 2}
@@ -120,7 +128,7 @@ class ReconstructionTransformer(nn.Module):
         assert L == self.seq_len, "input length mismatch"
 
         # 0) retrieval **pre‑embedding**
-        if self.retrieval_module and self.retrieval_loc == "pre-embedding":
+        if self.retrieval_enabled and self.retrieval_loc == "pre-embedding":
             x = self._aggregate_pre_embedding(x, retrieval_cand)
 
         # ------------------------------------------------------------------ #
@@ -131,7 +139,7 @@ class ReconstructionTransformer(nn.Module):
         x = x + self.pos_embed(pos_idx).unsqueeze(0)
 
         # retrieval **post‑embedding**
-        if self.retrieval_module and self.retrieval_loc == "post-embedding":
+        if self.retrieval_enabled and self.retrieval_loc == "post-embedding":
             x = self._aggregate_post_embedding(x, retrieval_cand)
 
         # ------------------------------------------------------------------ #
@@ -143,7 +151,7 @@ class ReconstructionTransformer(nn.Module):
         memory_main = memory[:, 1:, :]                       # discard cls
 
         # retrieval **post‑encoder**
-        if self.retrieval_module and self.retrieval_loc == "post-encoder":
+        if self.retrieval_enabled and self.retrieval_loc == "post-encoder":
             memory_main = self._aggregate_post_embedding(memory_main, retrieval_cand)
 
         # ------------------------------------------------------------------ #
@@ -191,6 +199,34 @@ class ReconstructionTransformer(nn.Module):
 
         blended = (1 - self.agg_lambda) * flat_x + self.agg_lambda * mean_cand
         return blended.view(B, L, H)
+
+    # ------------------------------------------------------------------ #
+    # Retrieval‑module mode helper  ✨ NEW ✨
+    # ------------------------------------------------------------------ #
+    def set_retrieval_module_mode(self, mode: str) -> None:
+        """
+        Forward `mode` to the retrieval component (if any).
+
+        Args
+        ----
+        mode : str
+            One of {'train', 'eval', 'off'}.
+        """
+        if self.retrieval_module is None:
+            return                       # nothing to do
+
+        mode = mode.lower()
+        if mode == 'train':
+            self.retrieval_module.train()   # enable gradients / dropout
+            self.retrieval_enabled = True
+        elif mode == 'eval':
+            self.retrieval_module.eval()    # eval mode but still queried
+            self.retrieval_enabled = True
+        elif mode == 'off':
+            # completely skip retrieval during forward
+            self.retrieval_enabled = False
+        else:
+            raise ValueError(f"Unknown retrieval mode: {mode}")    
 
 
 # convenient wrapper identical to the old class name

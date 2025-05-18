@@ -9,7 +9,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from optim import LRScheduler
-from torch_dataset import TorchDataset
+from torch_dataset import TorchDataset, collate_with_optional_cand
 from utils.log_utils import make_job_name
 from utils.checkpoint_utils import EarlyStopCounter, EarlyStopSignal
 from loss import Loss
@@ -51,6 +51,7 @@ class Trainer():
                                      name=kwargs.exp_scheduler,
                                      optimizer=optimizer)
         self.loss      = loss
+        self.epoch = 0
 
         # our new dataset, returns (x, cand, y)
         self.dataset = torch_dataset
@@ -67,12 +68,13 @@ class Trainer():
 
         # generate val masks as before
         self.val_masks = generate_mask_val(
-            shape=(1, self.dataset.seq_len, self.dataset.X_train.size(-1)),
-            n_hidden=self.kwargs.exp_n_hidden_features,
-            batch_size=self.batch_size_val,
-            deterministic=self.kwargs.exp_deterministic_masks_val,
-            n_masks=self.kwargs.exp_num_masks_val,
-            p_mask=self.p_mask_val
+            data_shape=(self.batch_size_val,          # B
+                        self.dataset.seq_len,         # L
+                        self.dataset.X_train.size(-1) # D
+                      ),
+            num_masks=1,
+            p_mask=self.p_mask_val,
+            deterministic=self.kwargs.exp_deterministic_masks_val
         )
 
         self.is_main_process = (not self.is_distributed) or (self.rank == 0)
@@ -97,12 +99,14 @@ class Trainer():
                             batch_size=self.batch_size,
                             shuffle=True,
                             num_workers=0,
+                            collate_fn=collate_with_optional_cand,
                             drop_last=True)
         else:
             dl = self.get_distributed_dataloader(self.batch_size, self.dataset)
 
         self.model.to(self.device)
         for epoch in range(1, self.n_epochs + 1):
+            self.epoch = epoch
             epoch_start = datetime.now()
             if self.is_main_process:
                 print(f"\n{' Training epoch '+str(epoch)+' ':#^80}")
@@ -121,14 +125,14 @@ class Trainer():
                 # x: [B, L, D], cand: [B, K, L, D] or None, y: [...]
                 # apply masking
                 data = apply_mask(
-                    x, p_mask=self.p_mask_train,
+                    data = x, 
+                    p_mask=self.p_mask_train,
                     force_mask=self.kwargs.exp_force_all_masked,
-                    cardinalities=self.dataset.cardinalities,
                     device=self.device
                 )
 
                 self.optimizer.zero_grad()
-                with torch.cuda.amp.autocast(enabled=self.kwargs.model_amp):
+                with torch.amp.autocast('cuda',enabled=self.kwargs.model_amp):
                     if cand is not None:
                         out = self.model(data['masked_tensor'], cand)
                     else:
@@ -136,13 +140,12 @@ class Trainer():
                     # loss against ground truth y
                     self.loss.compute(
                         output=out,
-                        ground_truth_data=data['ground_truth'],
-                        num_or_cat=self.dataset.num_or_cat,
-                        mask_matrix=data['mask_matrix_list']
+                        ground_truth=data['ground_truth'],
+                        mask_matrix=data['mask_matrix']
                     )
                     loss_dict = self.loss.finalize_batch_loss()
                     train_loss = loss_dict['train']['total_loss']
-                    self.loss.update_losses()
+                    #self.loss.update_losses()
                     self.scaler.scale(train_loss).backward()
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -164,11 +167,14 @@ class Trainer():
                 end_experiment=(epoch == self.n_epochs)
             )
             if stop_signal == EarlyStopSignal.STOP:
+                print("Eraly stopped")
                 break
 
-            if epoch % self.kwargs.exp_eval_every_n == 0:
+            if epoch % 1 == 0:
                 self.val()
+                print("Done evaluating")
                 self.compute_metrics()
+                print("Done computing metrics")
                 self.dataset.set_mode('train')
                 self.loss.set_mode('train')
 
@@ -190,6 +196,7 @@ class Trainer():
                             batch_size=self.batch_size_val,
                             shuffle=False,
                             num_workers=0,
+                            collate_fn=collate_with_optional_cand,
                             drop_last=False)
         else:
             dl = self.get_distributed_dataloader(self.batch_size_val, self.dataset)
@@ -210,13 +217,14 @@ class Trainer():
             cand_tensor = None
 
         for x, _, y in dl:
+          if x.shape[0] == self.kwargs.exp_batch_size:
             # for each mask in self.val_masks
+            print(x.shape)
             batch_scores = []
             for mask in self.val_masks:
                 data = apply_mask(
                     x, p_mask=0.0,
                     eval_mode=True,
-                    cardinalities=self.dataset.cardinalities,
                     device=self.device,
                     mask_matrix=~mask
                 )
@@ -224,17 +232,17 @@ class Trainer():
                     out = self.model(data['masked_tensor'], cand_tensor)
                 else:
                     out = self.model(data['masked_tensor'])
-                self.loss.compute(
+                per_sample = self.loss.compute_per_sample(
                     output=out,
-                    ground_truth_data=data['ground_truth'],
-                    num_or_cat=self.dataset.num_or_cat,
-                    mask_matrix=data['mask_matrix_list']
+                    ground_truth=data['ground_truth'],
+                    #num_or_cat=self.dataset.num_or_cat,
+                    mask_matrix=data['mask_matrix']
                 )
-                batch_scores.append(self.loss.get_individual_val_loss())
-                self.loss.reset_val_loss()
+                batch_scores.append(per_sample)
+    
 
             # stack over all masks → [B, n_masks]
-            stacked = torch.stack(batch_scores, dim=1)
+            stacked = torch.stack(batch_scores, dim=0).t()
             # normalize & aggregate as before
             if self.kwargs.exp_normalize_ad_loss:
                 mn, mx = stacked.min(1)[0], stacked.max(1)[0]
@@ -244,7 +252,7 @@ class Trainer():
             else:
                 final_score = stacked.max(1)[0]
             # collect (score, label)
-            self.val_ad_score.append(torch.stack([final_score, y.squeeze(1)], dim=1))
+            self.val_ad_score.append(torch.stack([final_score,  y.view(-1).float()], dim=1))
 
         # concatenate and gather across ranks if needed
         self.val_ad_score = torch.cat(self.val_ad_score, dim=0)
@@ -254,8 +262,8 @@ class Trainer():
             self.val_ad_score = torch.cat(gathered, dim=0)
 
         # split into scores & labels on CPU
-        scores = self.val_ad_score[:,0].cpu()
-        labels = self.val_ad_score[:,1].cpu().int()
+        scores = self.val_ad_score[:,0].cpu().detach()
+        labels = self.val_ad_score[:,1].cpu().detach().int()
         self.sum_score_ad = (scores, labels)
 
     def compute_metrics(self):

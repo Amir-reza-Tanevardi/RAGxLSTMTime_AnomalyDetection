@@ -65,22 +65,36 @@ class Loss:
 
     def finalize_batch_loss(self):
         """
-        Return average loss over masked entries in this batch,
-        scaled for backward().
+        Return a dict compatible with the old API:
+        {'train': {'total_loss': <scalar Tensor>}}
         """
         if self.batch_count == 0:
-            return torch.tensor(0.0, device=self.device)
-        return self.batch_loss / self.batch_count
+            val = torch.tensor(0.0, device=self.device)
+        else:
+            val = self.batch_loss / self.batch_count
+        return {'train': {'total_loss': val}}
 
     def finalize_epoch_losses(self, eval_model: bool = False):
         """
-        Return dictionary of epoch-level average loss.
+        Return dict compatible with old API:
+        { 'train': {'total_loss': <avg Tensor>}, 'val': {...} }
         """
-        if self.epoch_count == 0:
-            avg = 0.0
-        else:
-            avg = (self.epoch_loss / self.epoch_count).item()
-        return {self._mode: {'mse': avg}}
+        avg = (self.epoch_loss / self.epoch_count) if self.epoch_count>0 else torch.tensor(0.0, device=self.device)
+        return {self._mode: {'total_loss': avg}}
+
+    def compute_per_sample(self, output, ground_truth, mask_matrix):
+        """
+        Return MSE per‑sample as a 1‑D tensor of length B
+        instead of a single averaged scalar.
+        """
+        se = (output - ground_truth).pow(2)          # [B,L,D]
+        masked_se = se * mask_matrix                 # zeros where not masked
+        # sum over (L,D)  →  [B]
+        loss_per_sample = masked_se.view(output.size(0), -1).sum(1)
+        # normalise by number of masked positions per sample
+        denom = mask_matrix.view(output.size(0), -1).sum(1).clamp(min=1)
+        return loss_per_sample / denom
+    
 
     def get_individual_val_loss(self):
         """
