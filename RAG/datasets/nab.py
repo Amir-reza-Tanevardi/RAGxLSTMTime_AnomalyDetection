@@ -39,8 +39,7 @@ class NABDataset(BaseDataset):
 
         # look up anomalies for this file key
         # JSON keys are relative paths, e.g. "artificialWithAnomaly/art_daily_jumpsup.csv"
-        key = os.path.join(os.path.basename(os.path.dirname(self.filename)),
-                           os.path.basename(self.filename))
+        key = 'realAWSCloudwatch/ec2_cpu_utilization_24ae8d.csv'
         anomalies = set(self.anomaly_map.get(key, []))
 
         # build y: 1 if timestamp exactly in anomalies, else 0

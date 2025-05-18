@@ -79,13 +79,13 @@ def make_job_name(kwargs, seed=None, iteration=None):
             log_name_ret_type = "v_att"
         else:
             log_name_ret_type = kwargs.exp_retrieval_type
-        job_name += job_name_addition.format(
-            retrieval_type=log_name_ret_type,
-            retrieval_location = kwargs.exp_retrieval_location[:7],
-            retrieval_agg_location = kwargs.exp_retrieval_agg_location[:7],
-            retrieval_num_helpers = kwargs.exp_retrieval_num_helpers,
-            num_train_inference = kwargs.exp_retrieval_num_candidate_helpers
-        )
+        # job_name += job_name_addition.format(
+        #     retrieval_type=log_name_ret_type,
+        #     retrieval_location = kwargs.exp_retrieval_location[:7],
+        #     retrieval_agg_location = kwargs.exp_retrieval_agg_location[:7],
+        #     retrieval_num_helpers = kwargs.exp_retrieval_num_helpers,
+        #     num_train_inference = kwargs.exp_retrieval_num_candidate_helpers
+        # )
 
     return job_name
 
